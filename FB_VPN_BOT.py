@@ -1,4 +1,5 @@
 import os
+import json
 import requests
 import psycopg2
 import uuid
@@ -35,7 +36,6 @@ def send_to_telegram_admin_photo(fb_sender_id, image_url, selected_plan, plan_co
         f"📦 Plan: **{selected_plan}**\n\n"
         f"👇 အောက်ပါ Approve ကိုနှိပ်ပါက FB User ထံသို့ Key အလိုအလျောက် ပေးပို့မည်ဖြစ်ပါသည်။"
     )
-    
     reply_markup = {
         "inline_keyboard": [
             [
@@ -44,7 +44,6 @@ def send_to_telegram_admin_photo(fb_sender_id, image_url, selected_plan, plan_co
             ]
         ]
     }
-    
     for admin_id in ADMIN_IDS:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
         payload = {
@@ -66,6 +65,20 @@ def send_fb_quick_replies(recipient_id, text, quick_replies):
     payload = {"recipient": {"id": recipient_id}, "message": {"text": text, "quick_replies": quick_replies}}
     requests.post(url, json=payload)
 
+def send_fb_local_image(recipient_id, file_path):
+    """Facebook Messenger သို့ Local Image (Screenshot) ပို့ရန်"""
+    url = f"https://graph.facebook.com/v18.0/me/messages?access_token={FB_PAGE_ACCESS_TOKEN}"
+    if os.path.exists(file_path):
+        payload = {
+            'recipient': json.dumps({'id': recipient_id}),
+            'message': json.dumps({'attachment': {'type': 'image', 'payload': {'is_reusable': True}}})
+        }
+        with open(file_path, 'rb') as f:
+            files = {'filedata': (os.path.basename(file_path), f, 'image/jpeg')}
+            requests.post(url, data=payload, files=files)
+    else:
+        send_fb_message(recipient_id, "(⚠️ Admin မှ Screenshot ပုံ ထည့်သွင်းထားခြင်း မရှိသေးပါ)")
+
 # --- 🎁 Free Trial Auto Generator ---
 def handle_free_trial(sender_id):
     send_fb_message(sender_id, "⏳ Free Trial Key ကို ဖန်တီးနေပါသည်... ခဏစောင့်ပါ ခင်ဗျာ။")
@@ -73,11 +86,11 @@ def handle_free_trial(sender_id):
         conn = get_db()
         c = conn.cursor()
         
-        c.execute("SELECT unique_id, is_trial_used FROM users WHERE telegram_id=%s", (sender_id,))
+        c.execute("SELECT unique_id, is_trial_used FROM users WHERE telegram_id=%s", (int(sender_id),))
         user = c.fetchone()
         if not user:
             unique_id = str(uuid.uuid4())[:8].upper()
-            c.execute("INSERT INTO users (telegram_id, unique_id, is_trial_used, username, referral_reward_claimed) VALUES (%s, %s, 0, %s, 0)", (sender_id, unique_id, f"FB_{sender_id}"))
+            c.execute("INSERT INTO users (telegram_id, unique_id, is_trial_used, username, referral_reward_claimed) VALUES (%s, %s, 0, %s, 0)", (int(sender_id), unique_id, f"FB_{sender_id}"))
             is_used = 0
         else:
             is_used = user[1]
@@ -108,15 +121,18 @@ def handle_free_trial(sender_id):
         client.rename_key(new_key.key_id, suffix)
         client.add_data_limit(new_key.key_id, int(3 * 1e9))
         
-        c.execute('''INSERT INTO plans (telegram_id, key_id, plan_type, data_limit, start_date, end_date, is_active, username) VALUES (%s, %s, %s, %s, %s, %s, 1, %s)''', (sender_id, new_key.key_id, "FreeTrial", int(3 * 1e9), db_start_date, db_end_date, f"FB_{sender_id}"))
-        c.execute("UPDATE users SET is_trial_used=1 WHERE telegram_id=%s", (sender_id,))
+        c.execute('''INSERT INTO plans (telegram_id, key_id, plan_type, data_limit, start_date, end_date, is_active, username) VALUES (%s, %s, %s, %s, %s, %s, 1, %s)''', (int(sender_id), new_key.key_id, "FreeTrial", int(3 * 1e9), db_start_date, db_end_date, f"FB_{sender_id}"))
+        c.execute("UPDATE users SET is_trial_used=1 WHERE telegram_id=%s", (int(sender_id),))
         conn.close()
         
         final_url = f"{new_key.access_url.split('#')[0]}#{urllib.parse.quote(suffix)}"
         
+        # 🌟 Key ကို သီးသန့် ခွဲပို့ခြင်း 🌟
+        msg = f"✅ **Free Trial 3GB ရရှိပါပြီ။**\n⏱ **(၅) ရက်တိတိ အသုံးပြုနိုင်ပါသည်။**\n\n👤 **Name:** {suffix}\n\n👇 **အောက်ပါ Key ကို Copy ကူးပြီး Outline VPN တွင် ထည့်သွင်းအသုံးပြုနိုင်ပါပြီ။**"
+        send_fb_message(sender_id, msg)
+        
         quick_replies = [{"content_type": "text", "title": "🏠 ပင်မ မီနူးသို့", "payload": "MAIN_MENU"}]
-        msg = f"✅ **Free Trial 3GB ရရှိပါပြီ။**\n⏱ **(၅) ရက်တိတိ အသုံးပြုနိုင်ပါသည်။**\n\n👤 **Name:** {suffix}\n\n👇 **အောက်ပါ Key ကို Copy ကူးပြီး Outline VPN တွင် ထည့်သွင်းအသုံးပြုနိုင်ပါပြီ။**\n\n{final_url}"
-        send_fb_quick_replies(sender_id, msg, quick_replies)
+        send_fb_quick_replies(sender_id, final_url, quick_replies)
         
         for admin in ADMIN_IDS:
             requests.post(
@@ -130,25 +146,60 @@ def handle_free_trial(sender_id):
         for admin in ADMIN_IDS:
             requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": admin, "text": f"❌ FB Free Trial Error: {str(e)}"})
 
+# --- 🔍 Plan/Data စစ်ရန် Auto Logic ---
+def handle_check_data(sender_id):
+    send_fb_message(sender_id, "⏳ အချက်အလက်များ ရှာဖွေနေပါသည်...")
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        c.execute("SELECT key_id, plan_type, data_limit, start_date, end_date FROM plans WHERE telegram_id=%s AND is_active=1", (int(sender_id),))
+        active_plans = c.fetchall()
+
+        if not active_plans:
+            conn.close()
+            quick_replies = [{"content_type": "text", "title": "🏠 ပင်မ မီနူးသို့", "payload": "MAIN_MENU"}]
+            send_fb_quick_replies(sender_id, "❌ လက်ရှိ Plan မရှိသေးပါ။ Plan ဝယ်ယူရန် Menu သို့ ပြန်သွားပါ။", quick_replies)
+            return
+
+        c.execute("SELECT value FROM settings WHERE key='outline_api_url'")
+        api_url = c.fetchone()[0]
+        c.execute("SELECT value FROM settings WHERE key='outline_cert_sha256'")
+        cert_sha = c.fetchone()[0]
+        conn.close()
+
+        client = OutlineVPN(api_url=api_url, cert_sha256=cert_sha)
+        all_keys = client.get_keys()
+
+        msg = "👤 **လက်ရှိ Plan အချက်အလက်များ**\n\n"
+        for db_kid, ptype, dlimit, sdate, edate in active_plans:
+            used_gb = next((((getattr(k, 'used_bytes', 0) or 0) / 1e9) for k in all_keys if str(k.key_id) == str(db_kid)), 0)
+            msg += f"🔹 Plan: {ptype}\n"
+            msg += f"📅 စဝယ်သည့်ရက်: {sdate[:10]}\n"
+            if edate: msg += f"⏳ ကုန်ဆုံးရက်: {edate[:10]}\n"
+            if dlimit: msg += f"📊 သတ်မှတ် Data: {dlimit/1e9:.2f} GB\n"
+            msg += f"📈 အသုံးပြုပီး Data: {used_gb:.2f} GB\n---\n"
+
+        quick_replies = [{"content_type": "text", "title": "🏠 ပင်မ မီနူးသို့", "payload": "MAIN_MENU"}]
+        send_fb_quick_replies(sender_id, msg, quick_replies)
+
+    except Exception as e:
+        quick_replies = [{"content_type": "text", "title": "🏠 ပင်မ မီနူးသို့", "payload": "MAIN_MENU"}]
+        send_fb_quick_replies(sender_id, f"❌ Server Error ဖြစ်နေပါသည်။ နောက်မှ ပြန်စမ်းကြည့်ပါ ခင်ဗျာ။", quick_replies)
+
+
 # ==========================================
-# 🌐 WEBHOOK ROUTES (ချိတ်ဆက်မှု လမ်းကြောင်းများ)
+# 🌐 WEBHOOK ROUTES
 # ==========================================
 @app.route("/", methods=["GET"])
 def home():
-    return "Facebook Bot is running with Get Started Button!", 200
+    return "Facebook Bot is running perfectly with Check Data & Screenshots!", 200
 
-# 🌟 GET STARTED BUTTON ဆောက်ရန် လမ်းကြောင်းသစ် 🌟
 @app.route("/setup", methods=["GET"])
 def setup_messenger_profile():
     url = f"https://graph.facebook.com/v18.0/me/messenger_profile?access_token={FB_PAGE_ACCESS_TOKEN}"
     payload = {
         "get_started": {"payload": "GET_STARTED"},
-        "greeting": [
-            {
-                "locale": "default",
-                "text": "HappyHive VPN မှ ကြိုဆိုပါတယ်။ စတင်ရန် အောက်ပါ 'Get Started' (သို့မဟုတ်) 'စတင်မည်' ကို နှိပ်ပါ ခင်ဗျာ။"
-            }
-        ]
+        "greeting": [{"locale": "default", "text": "HappyHive VPN မှ ကြိုဆိုပါတယ်။ စတင်ရန် အောက်ပါ 'Get Started' (သို့မဟုတ်) 'စတင်မည်' ကို နှိပ်ပါ ခင်ဗျာ。"}]
     }
     res = requests.post(url, json=payload)
     return f"Setup Result: {res.text}", 200
@@ -171,18 +222,15 @@ def handle_messages():
             for messaging_event in entry.get("messaging", []):
                 sender_id = messaging_event["sender"]["id"]
 
-                # 🌟 User က Get Started ခလုတ်ကို နှိပ်လိုက်တဲ့အခါ (Postback Event) 🌟
                 if "postback" in messaging_event:
                     payload = messaging_event["postback"]["payload"]
                     if payload == "GET_STARTED":
                         show_main_menu(sender_id)
 
-                # User က Menu (Quick Reply) ခလုတ်တွေကို နှိပ်တဲ့အခါ
                 elif "message" in messaging_event and "quick_reply" in messaging_event["message"]:
                     payload = messaging_event["message"]["quick_reply"]["payload"]
                     handle_payload(sender_id, payload)
                 
-                # User က ငွေလွှဲပြေစာ ပို့တဲ့အခါ
                 elif "message" in messaging_event and "attachments" in messaging_event["message"]:
                     for attachment in messaging_event["message"]["attachments"]:
                         if attachment["type"] == "image":
@@ -195,7 +243,6 @@ def handle_messages():
                             send_to_telegram_admin_photo(sender_id, image_url, selection["name"], selection["code"])
                             if sender_id in user_plan_selections: del user_plan_selections[sender_id]
                 
-                # User က ရိုးရိုး စာသားပို့တဲ့အခါ
                 elif "message" in messaging_event and "text" in messaging_event["message"]:
                     text = messaging_event["message"]["text"].strip().lower()
                     if text in ["hi", "hello", "start", "menu"]: show_main_menu(sender_id)
@@ -210,6 +257,7 @@ def show_main_menu(sender_id):
     quick_replies = [
         {"content_type": "text", "title": "🛒 Plan ဝယ်ရန်", "payload": "BUY_PLAN"},
         {"content_type": "text", "title": "🎁 3GB Free Trial", "payload": "FREE_TRIAL"},
+        {"content_type": "text", "title": "🔍 Plan/Data စစ်ရန်", "payload": "CHECK_DATA"},
         {"content_type": "text", "title": "❓ အသုံးပြုပုံ", "payload": "HOW_TO_USE"}
     ]
     send_fb_quick_replies(sender_id, "🌟 Welcome to HappyHive VPN! 🌟\n\n👇 အောက်ပါ Menu များမှတဆင့် မိမိအသုံးပြုလိုသော ဝန်ဆောင်မှုကို ရွေးချယ်ပါ ခင်ဗျာ။", quick_replies)
@@ -244,10 +292,29 @@ def handle_payload(sender_id, payload):
     elif payload == "FREE_TRIAL":
         handle_free_trial(sender_id)
         
+    elif payload == "CHECK_DATA":
+        handle_check_data(sender_id)
+        
     elif payload == "HOW_TO_USE":
-        msg = "Android တွင် အသုံးပြုလိုပါက Play Store မှ 'Outline' App ကို ဒေါင်းလုဒ်ဆွဲပါ။ iOS အတွက် App Store မှ 'Outline App' ကို ဒေါင်းလုဒ်ဆွဲပါ။ Admin မှ ပေးသော Key ကို Copy ကူး၍ App ထဲတွင် Add Server နှိပ်ပြီး အသုံးပြုနိုင်ပါသည်။"
-        quick_replies = [{"content_type": "text", "title": "🏠 ပင်မ မီနူးသို့", "payload": "MAIN_MENU"}]
-        send_fb_quick_replies(sender_id, msg, quick_replies)
+        quick_replies = [
+            {"content_type": "text", "title": "🤖 Android", "payload": "HTU_ANDROID"},
+            {"content_type": "text", "title": "🍎 Apple (iOS)", "payload": "HTU_APPLE"},
+            {"content_type": "text", "title": "🔙 နောက်သို့", "payload": "MAIN_MENU"}
+        ]
+        send_fb_quick_replies(sender_id, "📱 မိမိအသုံးပြုမည့် ဖုန်းအမျိုးအစားကို ရွေးချယ်ပါ-", quick_replies)
+
+    # 🌟 Mind Map အတိုင်း အသုံးပြုပုံ Flow (App Download -> Screenshot -> Menu) 🌟
+    elif payload == "HTU_ANDROID":
+        send_fb_message(sender_id, "🤖 **Android ဖုန်းများအတွက် အသုံးပြုပုံ**\n\n📥 Outline App Download ဆွဲရန်:\nhttps://play.google.com/store/apps/details?id=org.outline.android.client&hl=en_SG")
+        send_fb_local_image(sender_id, "android_ss.jpg") # Screenshot ပို့ပေးမည်
+        quick_replies = [{"content_type": "text", "title": "🔙 နောက်သို့", "payload": "HOW_TO_USE"}, {"content_type": "text", "title": "🏠 ပင်မ မီနူး", "payload": "MAIN_MENU"}]
+        send_fb_quick_replies(sender_id, "Menu သို့ ပြန်သွားရန် အောက်ပါခလုတ်ကို နှိပ်ပါ", quick_replies)
+
+    elif payload == "HTU_APPLE":
+        send_fb_message(sender_id, "🍎 **Apple (iOS) ဖုန်းများအတွက် အသုံးပြုပုံ**\n\n📥 Outline App Download ဆွဲရန်:\nhttps://apps.apple.com/us/app/outline-app/id1356177741")
+        send_fb_local_image(sender_id, "apple_ss.jpg") # Screenshot ပို့ပေးမည်
+        quick_replies = [{"content_type": "text", "title": "🔙 နောက်သို့", "payload": "HOW_TO_USE"}, {"content_type": "text", "title": "🏠 ပင်မ မီနူး", "payload": "MAIN_MENU"}]
+        send_fb_quick_replies(sender_id, "Menu သို့ ပြန်သွားရန် အောက်ပါခလုတ်ကို နှိပ်ပါ", quick_replies)
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
