@@ -9,25 +9,31 @@ app = Flask(__name__)
 # ==========================================
 FB_PAGE_ACCESS_TOKEN = os.environ.get("FB_PAGE_ACCESS_TOKEN")
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "happyhive_secret_99")
-
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8633829411:AAEdkGteDuDt4fjJABAIR7jIMLVIPQ1PPhA")
-ADMIN_IDS = [1656832105] # Admin တစ်ယောက်တည်း
+ADMIN_IDS = [1656832105] 
 
-# User တွေ Plan ရွေးတဲ့အခါ မှတ်သားထားမည့် နေရာ (Memory)
 user_plan_selections = {}
 
 # ==========================================
 # 🛠️ HELPER FUNCTIONS
 # ==========================================
-
-def send_to_telegram_admin_photo(fb_sender_id, image_url, selected_plan):
-    """Facebook မှ ပို့သော ပြေစာကို Telegram Admin ထံ ပို့ရန်"""
+def send_to_telegram_admin_photo(fb_sender_id, image_url, selected_plan, plan_code):
     caption_text = (
         f"🚨 **Facebook မှ ငွေလွှဲပြေစာ ရောက်လာပါပြီ!**\n\n"
         f"👤 FB User ID: `{fb_sender_id}`\n"
-        f"📦 ရွေးချယ်ထားသော Plan: **{selected_plan}**\n\n"
-        f"⚠️ Admin မှ ပြေစာကို စစ်ဆေးပြီး မှန်ကန်ပါက Telegram မှ '➕ Manual Key ထုတ်ရန်' ကိုသုံး၍ ဖန်တီးပြီး၊ FB Messenger မှတဆင့် User ထံသို့ Key ပြန်လည်ပေးပို့ပေးပါ။"
+        f"📦 Plan: **{selected_plan}**\n\n"
+        f"👇 အောက်ပါ Approve ကိုနှိပ်ပါက FB User ထံသို့ Key အလိုအလျောက် ပေးပို့မည်ဖြစ်ပါသည်။"
     )
+    
+    # Approve / Reject ခလုတ်များ ထည့်သွင်းခြင်း
+    reply_markup = {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Approve & Auto-Send Key", "callback_data": f"fbapp_{plan_code}_{fb_sender_id}"},
+                {"text": "❌ Reject", "callback_data": f"fbrej_{fb_sender_id}"}
+            ]
+        ]
+    }
     
     for admin_id in ADMIN_IDS:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
@@ -35,48 +41,36 @@ def send_to_telegram_admin_photo(fb_sender_id, image_url, selected_plan):
             "chat_id": admin_id,
             "photo": image_url,
             "caption": caption_text,
-            "parse_mode": "Markdown"
+            "parse_mode": "Markdown",
+            "reply_markup": reply_markup
         }
         requests.post(url, json=payload)
 
 def send_fb_message(recipient_id, message_text):
     url = f"https://graph.facebook.com/v18.0/me/messages?access_token={FB_PAGE_ACCESS_TOKEN}"
-    payload = {
-        "recipient": {"id": recipient_id},
-        "message": {"text": message_text}
-    }
+    payload = {"recipient": {"id": recipient_id}, "message": {"text": message_text}}
     requests.post(url, json=payload)
 
 def send_fb_quick_replies(recipient_id, text, quick_replies):
     url = f"https://graph.facebook.com/v18.0/me/messages?access_token={FB_PAGE_ACCESS_TOKEN}"
-    payload = {
-        "recipient": {"id": recipient_id},
-        "message": {
-            "text": text,
-            "quick_replies": quick_replies
-        }
-    }
+    payload = {"recipient": {"id": recipient_id}, "message": {"text": text, "quick_replies": quick_replies}}
     requests.post(url, json=payload)
 
 # ==========================================
 # 🌐 WEBHOOK ROUTES
 # ==========================================
-
 @app.route("/", methods=["GET"])
 def home():
-    return "Facebook Bot is running with Updated Plans!", 200
+    return "Facebook Bot is running with Auto-Approve Buttons!", 200
 
 @app.route("/webhook", methods=["GET"])
 def verify_webhook():
     mode = request.args.get("hub.mode")
     token = request.args.get("hub.verify_token")
     challenge = request.args.get("hub.challenge")
-
     if mode and token:
-        if mode == "subscribe" and token == FB_VERIFY_TOKEN:
-            return challenge, 200
-        else:
-            return "Forbidden", 403
+        if mode == "subscribe" and token == FB_VERIFY_TOKEN: return challenge, 200
+        else: return "Forbidden", 403
     return "OK", 200
 
 @app.route("/webhook", methods=["POST"])
@@ -87,43 +81,24 @@ def handle_messages():
             for messaging_event in entry.get("messaging", []):
                 sender_id = messaging_event["sender"]["id"]
 
-                # ၁။ User က Menu ခလုတ်များကို နှိပ်လာလျှင်
                 if "message" in messaging_event and "quick_reply" in messaging_event["message"]:
                     payload = messaging_event["message"]["quick_reply"]["payload"]
                     handle_payload(sender_id, payload)
                 
-                # ၂။ User က ဓာတ်ပုံ (Screenshot) ပို့လာလျှင်
                 elif "message" in messaging_event and "attachments" in messaging_event["message"]:
                     for attachment in messaging_event["message"]["attachments"]:
                         if attachment["type"] == "image":
                             image_url = attachment["payload"]["url"]
-                            
-                            # User ရွေးထားတဲ့ Plan ကို ပြန်ခေါ်မယ်
-                            selected_plan = user_plan_selections.get(sender_id, "Plan ရွေးချယ်ထားခြင်း မရှိပါ")
-                            
-                            # User ကို ပြန်ပြောမယ်
-                            send_fb_message(sender_id, "✅ ပြေစာလက်ခံရရှိပါပြီ။ Admin မှ စစ်ဆေးပြီးပါက VPN Key ကို ဤနေရာမှတဆင့် ပြန်လည်ပေးပို့ပေးပါမည်။ ခဏစောင့်ပေးပါ ခင်ဗျာ။")
-                            
-                            # Telegram Admin ကို လှမ်းပို့မယ်
-                            send_to_telegram_admin_photo(sender_id, image_url, selected_plan)
-                            
-                            # Memory ထဲက ပြန်ဖျက်မယ်
-                            if sender_id in user_plan_selections:
-                                del user_plan_selections[sender_id]
+                            selection = user_plan_selections.get(sender_id, {"name": "Unknown Plan", "code": "unknown"})
+                            send_fb_message(sender_id, "✅ ပြေစာလက်ခံရရှိပါပြီ။ Admin မှ စစ်ဆေးပြီးပါက VPN Key ကို ဤနေရာမှတဆင့် ပြန်လည်ပေးပို့ပေးပါမည်။")
+                            send_to_telegram_admin_photo(sender_id, image_url, selection["name"], selection["code"])
+                            if sender_id in user_plan_selections: del user_plan_selections[sender_id]
                 
-                # ၃။ User က ရိုးရိုး စာသား ပို့လာလျှင်
                 elif "message" in messaging_event and "text" in messaging_event["message"]:
                     text = messaging_event["message"]["text"].strip().lower()
-                    if text in ["hi", "hello", "start", "menu"]:
-                        show_main_menu(sender_id)
-                    else:
-                        send_fb_message(sender_id, "ရွေးချယ်ရန် Menu ကို ပြန်ခေါ်လိုပါက 'Menu' ဟု ရိုက်ထည့်ပါ ခင်ဗျာ။")
-
+                    if text in ["hi", "hello", "start", "menu"]: show_main_menu(sender_id)
+                    else: send_fb_message(sender_id, "ရွေးချယ်ရန် Menu ကို ပြန်ခေါ်လိုပါက 'Menu' ဟု ရိုက်ထည့်ပါ ခင်ဗျာ။")
     return "EVENT_RECEIVED", 200
-
-# ==========================================
-# 🤖 BOT LOGIC (Telegram မှ Plan များအတိုင်း)
-# ==========================================
 
 def show_main_menu(sender_id):
     quick_replies = [
@@ -131,12 +106,9 @@ def show_main_menu(sender_id):
         {"content_type": "text", "title": "🎁 3GB Free Trial", "payload": "FREE_TRIAL"},
         {"content_type": "text", "title": "❓ အသုံးပြုပုံ", "payload": "HOW_TO_USE"}
     ]
-    welcome_text = "🌟 Welcome to HappyHive VPN! 🌟\n\n👇 အောက်ပါ Menu များမှတဆင့် မိမိအသုံးပြုလိုသော ဝန်ဆောင်မှုကို ရွေးချယ်ပါ ခင်ဗျာ။"
-    send_fb_quick_replies(sender_id, welcome_text, quick_replies)
+    send_fb_quick_replies(sender_id, "🌟 Welcome to HappyHive VPN! 🌟\n\n👇 အောက်ပါ Menu များမှတဆင့် မိမိအသုံးပြုလိုသော ဝန်ဆောင်မှုကို ရွေးချယ်ပါ ခင်ဗျာ။", quick_replies)
 
 def handle_payload(sender_id, payload):
-    
-    # Plan ဝယ်ရန် နှိပ်သောအခါ (Telegram ရှိ Plan များအတိုင်း ပြသမည်)
     if payload == "BUY_PLAN":
         quick_replies = [
             {"content_type": "text", "title": "30GB (၂၀၀၀ကျပ်)", "payload": "PLAN_30GB"},
@@ -145,34 +117,22 @@ def handle_payload(sender_id, payload):
         ]
         send_fb_quick_replies(sender_id, "🛒 ဝယ်ယူလိုသော Plan ကို ရွေးချယ်ပါ-", quick_replies)
         
-    # သက်ဆိုင်ရာ Plan များကို နှိပ်သောအခါ
     elif payload in ["PLAN_30GB", "PLAN_50GB", "PLAN_100GB"]:
-        plan_names = {
-            "PLAN_30GB": "30GB Plan (၂၀၀၀ ကျပ်)",
-            "PLAN_50GB": "50GB Plan (၃၀၀၀ ကျပ်)",
-            "PLAN_100GB": "100GB Plan (၄၀၀၀ ကျပ်)"
+        plan_map = {
+            "PLAN_30GB": ("30GB Plan (၂၀၀၀ ကျပ်)", "plan_30gb"),
+            "PLAN_50GB": ("50GB Plan (၃၀၀၀ ကျပ်)", "plan_50gb"),
+            "PLAN_100GB": ("100GB Plan (၄၀၀၀ ကျပ်)", "plan_100gb")
         }
-        selected_plan = plan_names[payload]
-        
-        # User ရွေးတဲ့ Plan ကို မှတ်ထားမယ် (Screenshot ပို့ရင် Admin ကို တွဲပို့ဖို့)
-        user_plan_selections[sender_id] = selected_plan
-        
-        msg = (
-            f"သင်ရွေးချယ်ထားသော Plan: {selected_plan}\n\n"
-            f"ကျေးဇူးပြု၍ အောက်ပါ KPay သို့ ငွေလွှဲပြီး Screenshot ပြေစာ ဓာတ်ပုံကို ဤနေရာသို့ ပို့ပေးပါ။\n\n"
-            f"💰 KPay: 09799844344\n"
-            f"👤 Name: Nyein Chan\n"
-            f"📝 Note: shopping ဟုရေးပေးပါ။"
-        )
+        selected_plan, plan_code = plan_map[payload]
+        user_plan_selections[sender_id] = {"name": selected_plan, "code": plan_code}
+        msg = f"သင်ရွေးချယ်ထားသော Plan: {selected_plan}\n\nကျေးဇူးပြု၍ အောက်ပါ KPay သို့ ငွေလွှဲပြီး Screenshot ပြေစာ ဓာတ်ပုံကို ဤနေရာသို့ ပို့ပေးပါ။\n\n💰 KPay: 09799844344\n👤 Name: Nyein Chan\n📝 Note: shopping ဟုရေးပေးပါ။"
         send_fb_message(sender_id, msg)
         
     elif payload == "FREE_TRIAL":
-        msg = "🎁 Free Trial အတွက် Admin ထံသို့ စာတိုက်ရိုက် ပို့ထားပေးပါ။ Admin မှ စစ်ဆေးပြီးပါက 3GB (၅ ရက်) Key ကို ဤနေရာမှတဆင့် ချပေးပါမည်။"
-        send_fb_message(sender_id, msg)
+        send_fb_message(sender_id, "🎁 Free Trial အတွက် Admin ထံသို့ စာတိုက်ရိုက် ပို့ထားပေးပါ။ Admin မှ စစ်ဆေးပြီးပါက 3GB (၅ ရက်) Key ကို ဤနေရာမှတဆင့် ချပေးပါမည်။")
         
     elif payload == "HOW_TO_USE":
-        msg = "Android တွင် အသုံးပြုလိုပါက Play Store မှ 'Outline' App ကို ဒေါင်းလုဒ်ဆွဲပါ။ iOS အတွက် App Store မှ 'Outline App' ကို ဒေါင်းလုဒ်ဆွဲပါ။ Admin မှ ပေးသော Key ကို Copy ကူး၍ App ထဲတွင် Add Server နှိပ်ပြီး အသုံးပြုနိုင်ပါသည်။"
-        send_fb_message(sender_id, msg)
+        send_fb_message(sender_id, "Android တွင် အသုံးပြုလိုပါက Play Store မှ 'Outline' App ကို ဒေါင်းလုဒ်ဆွဲပါ။ iOS အတွက် App Store မှ 'Outline App' ကို ဒေါင်းလုဒ်ဆွဲပါ။ Admin မှ ပေးသော Key ကို Copy ကူး၍ App ထဲတွင် Add Server နှိပ်ပြီး အသုံးပြုနိုင်ပါသည်။")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
