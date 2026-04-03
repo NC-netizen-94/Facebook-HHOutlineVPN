@@ -17,7 +17,7 @@ DB_URL = os.environ.get('DATABASE_URL')
 
 # Telegram Admin အချက်အလက်များ (Messenger မှ ပြေစာများကို Telegram သို့ ပို့ရန်)
 TELEGRAM_BOT_TOKEN = "8633829411:AAEdkGteDuDt4fjJABAIR7jIMLVIPQ1PPhA"
-ADMIN_IDS = [1656832105, 1640264253]
+ADMIN_IDS = [1656832105]
 
 # --- Database Connection ---
 def get_db():
