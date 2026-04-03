@@ -316,7 +316,7 @@ def handle_payload(sender_id, payload):
         
     # 🌟 Admin သို့ ဆက်သွယ်ရန် လမ်းကြောင်းသစ် 🌟
     elif payload == "CONTACT_ADMIN":
-        msg = "👨‍💻 Admin နှင့် တိုက်ရိုက်ပြောဆိုရန် အောက်ပါ Telegram လင့်ခ်မှတဆင့် ဆက်သွယ်နိုင်ပါသည်-\n\n👉 https://t.me/HappyHive9496\n\n(သို့မဟုတ်) ဤ Messenger Chat Box တွင်လည်း စာရိုက်၍ မေးမြန်းထားနိုင်ပါသည် ခင်ဗျာ။"
+        msg = "👨‍💻 Admin နှင့် တိုက်ရိုက်ပြောဆိုရန် အောက်ပါ Telegram လင့်ခ်မှတဆင့် ဆက်သွယ်နိုင်ပါသည်-\n\n👉 https://t.me/HappyHive9496\n\n"
         quick_replies = [{"content_type": "text", "title": "🏠 ပင်မ မီနူးသို့", "payload": "MAIN_MENU"}]
         send_fb_quick_replies(sender_id, msg, quick_replies)
         
