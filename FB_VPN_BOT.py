@@ -1,6 +1,11 @@
 import os
 import requests
+import psycopg2
+import uuid
+import urllib.parse
+from datetime import datetime, timedelta
 from flask import Flask, request
+from outline_vpn.outline_vpn import OutlineVPN
 
 app = Flask(__name__)
 
@@ -11,12 +16,18 @@ FB_PAGE_ACCESS_TOKEN = os.environ.get("FB_PAGE_ACCESS_TOKEN")
 FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "happyhive_secret_99")
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8633829411:AAEdkGteDuDt4fjJABAIR7jIMLVIPQ1PPhA")
 ADMIN_IDS = [1656832105] 
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
 user_plan_selections = {}
 
 # ==========================================
 # 🛠️ HELPER FUNCTIONS
 # ==========================================
+def get_db():
+    conn = psycopg2.connect(DATABASE_URL)
+    conn.autocommit = True
+    return conn
+
 def send_to_telegram_admin_photo(fb_sender_id, image_url, selected_plan, plan_code):
     caption_text = (
         f"🚨 **Facebook မှ ငွေလွှဲပြေစာ ရောက်လာပါပြီ!**\n\n"
@@ -25,7 +36,6 @@ def send_to_telegram_admin_photo(fb_sender_id, image_url, selected_plan, plan_co
         f"👇 အောက်ပါ Approve ကိုနှိပ်ပါက FB User ထံသို့ Key အလိုအလျောက် ပေးပို့မည်ဖြစ်ပါသည်။"
     )
     
-    # Approve / Reject ခလုတ်များ ထည့်သွင်းခြင်း
     reply_markup = {
         "inline_keyboard": [
             [
@@ -56,12 +66,81 @@ def send_fb_quick_replies(recipient_id, text, quick_replies):
     payload = {"recipient": {"id": recipient_id}, "message": {"text": text, "quick_replies": quick_replies}}
     requests.post(url, json=payload)
 
+# --- 🎁 Free Trial Auto Generator ---
+def handle_free_trial(sender_id):
+    send_fb_message(sender_id, "⏳ Free Trial Key ကို ဖန်တီးနေပါသည်... ခဏစောင့်ပါ ခင်ဗျာ။")
+    try:
+        conn = get_db()
+        c = conn.cursor()
+        
+        # User အဟောင်းလား/အသစ်လား စစ်ဆေးခြင်း
+        c.execute("SELECT unique_id, is_trial_used FROM users WHERE telegram_id=%s", (sender_id,))
+        user = c.fetchone()
+        if not user:
+            unique_id = str(uuid.uuid4())[:8].upper()
+            c.execute("INSERT INTO users (telegram_id, unique_id, is_trial_used, username, referral_reward_claimed) VALUES (%s, %s, 0, %s, 0)", (sender_id, unique_id, f"FB_{sender_id}"))
+            is_used = 0
+        else:
+            is_used = user[1]
+            
+        # အသုံးပြုပြီးသားဆိုလျှင် ပိတ်ပင်ခြင်း
+        if is_used == 1:
+            conn.close()
+            send_fb_message(sender_id, "⚠️ Free Trial ကို အသုံးပြုပြီးဖြစ်ပါသည်။ Plan ဝယ်ယူရန်အတွက် Menu သို့ပြန်သွားပါ။")
+            return
+            
+        # Outline Settings များ ယူခြင်း
+        c.execute("SELECT value FROM settings WHERE key='outline_api_url'")
+        api_url = c.fetchone()[0]
+        c.execute("SELECT value FROM settings WHERE key='outline_cert_sha256'")
+        cert_sha = c.fetchone()[0]
+        
+        client = OutlineVPN(api_url=api_url, cert_sha256=cert_sha)
+        
+        # Key အသစ်ဖန်တီးခြင်း
+        new_key = client.create_key()
+        start_date = datetime.now()
+        end_date = start_date + timedelta(days=5) # ၅ ရက်
+        db_start_date = start_date.strftime("%Y-%m-%d %H:%M:%S")
+        db_end_date = end_date.strftime("%Y-%m-%d %H:%M:%S")
+        
+        start_str = start_date.strftime('%Y-%m-%d')
+        end_str = end_date.strftime('%Y-%m-%d')
+        suffix = f"FreeTrial_{start_str}_{end_str}_{sender_id}_Key{new_key.key_id}"
+        
+        # Outline တွင် အမည်နှင့် Data (3GB) သတ်မှတ်ခြင်း
+        client.rename_key(new_key.key_id, suffix)
+        client.add_data_limit(new_key.key_id, int(3 * 1e9))
+        
+        # Database သို့ သိမ်းဆည်းခြင်း
+        c.execute('''INSERT INTO plans (telegram_id, key_id, plan_type, data_limit, start_date, end_date, is_active, username) VALUES (%s, %s, %s, %s, %s, %s, 1, %s)''', (sender_id, new_key.key_id, "FreeTrial", int(3 * 1e9), db_start_date, db_end_date, f"FB_{sender_id}"))
+        c.execute("UPDATE users SET is_trial_used=1 WHERE telegram_id=%s", (sender_id,))
+        conn.close()
+        
+        final_url = f"{new_key.access_url.split('#')[0]}#{urllib.parse.quote(suffix)}"
+        
+        # Facebook သို့ Key ပေးပို့ခြင်း
+        msg = f"✅ **Free Trial 3GB ရရှိပါပြီ။**\n⏱ **(၅) ရက်တိတိ အသုံးပြုနိုင်ပါသည်။**\n\n👤 **Name:** {suffix}\n\n👇 **အောက်ပါ Key ကို Copy ကူးပြီး Outline VPN တွင် ထည့်သွင်းအသုံးပြုနိုင်ပါပြီ။**\n\n{final_url}"
+        send_fb_message(sender_id, msg)
+        
+        # Admin ထံ အသိပေးခြင်း
+        for admin in ADMIN_IDS:
+            requests.post(
+                f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+                json={"chat_id": admin, "text": f"🎁 **FB Free Trial Alert**\nFB User ID `{sender_id}` မှ 3GB Free Trial ရယူသွားပါသည်။", "parse_mode": "Markdown"}
+            )
+            
+    except Exception as e:
+        send_fb_message(sender_id, f"❌ စနစ်ချို့ယွင်းမှုဖြစ်ပေါ်နေပါသည်။ Admin သို့ အကြောင်းကြားထားပါသည်။")
+        for admin in ADMIN_IDS:
+            requests.post(f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage", json={"chat_id": admin, "text": f"❌ FB Free Trial Error: {str(e)}"})
+
 # ==========================================
 # 🌐 WEBHOOK ROUTES
 # ==========================================
 @app.route("/", methods=["GET"])
 def home():
-    return "Facebook Bot is running with Auto-Approve Buttons!", 200
+    return "Facebook Bot is running with Auto Free Trial!", 200
 
 @app.route("/webhook", methods=["GET"])
 def verify_webhook():
@@ -129,7 +208,8 @@ def handle_payload(sender_id, payload):
         send_fb_message(sender_id, msg)
         
     elif payload == "FREE_TRIAL":
-        send_fb_message(sender_id, "🎁 Free Trial အတွက် Admin ထံသို့ စာတိုက်ရိုက် ပို့ထားပေးပါ။ Admin မှ စစ်ဆေးပြီးပါက 3GB (၅ ရက်) Key ကို ဤနေရာမှတဆင့် ချပေးပါမည်။")
+        # အခုခလုတ်နှိပ်တာနဲ့ အလိုအလျောက် Key ထုတ်မယ့်အပိုင်းကို သွားပါမယ်
+        handle_free_trial(sender_id)
         
     elif payload == "HOW_TO_USE":
         send_fb_message(sender_id, "Android တွင် အသုံးပြုလိုပါက Play Store မှ 'Outline' App ကို ဒေါင်းလုဒ်ဆွဲပါ။ iOS အတွက် App Store မှ 'Outline App' ကို ဒေါင်းလုဒ်ဆွဲပါ။ Admin မှ ပေးသော Key ကို Copy ကူး၍ App ထဲတွင် Add Server နှိပ်ပြီး အသုံးပြုနိုင်ပါသည်။")
