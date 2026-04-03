@@ -1,147 +1,167 @@
 import os
-import psycopg2
+import json
 import requests
-from flask import Flask, request, jsonify
-from datetime import datetime
-import uuid
+import psycopg2
+from flask import Flask, request
 
 app = Flask(__name__)
 
-# --- Environment Variables ---
-# Facebook ပေးမည့် Token များ (Render တွင် သွားထည့်ရပါမည်)
-FB_PAGE_ACCESS_TOKEN = os.environ.get('FB_PAGE_ACCESS_TOKEN', 'YOUR_PAGE_ACCESS_TOKEN')
-FB_VERIFY_TOKEN = os.environ.get('FB_VERIFY_TOKEN', 'happyhive_webhook_secret_123')
+# ==========================================
+# ⚙️ CONFIGURATIONS (အချက်အလက်များ)
+# ==========================================
+# Render ရဲ့ Environment Variables ကနေ လှမ်းယူမယ့် အရာများ
+FB_PAGE_ACCESS_TOKEN = os.environ.get("FB_PAGE_ACCESS_TOKEN")
+FB_VERIFY_TOKEN = os.environ.get("FB_VERIFY_TOKEN", "happyhive_secret_99")
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
-# Database (Telegram Bot နှင့် အတူတူပင် ဖြစ်သည်)
-DB_URL = os.environ.get('DATABASE_URL')
-
-# Telegram Admin အချက်အလက်များ (Messenger မှ ပြေစာများကို Telegram သို့ ပို့ရန်)
-TELEGRAM_BOT_TOKEN = "8633829411:AAEdkGteDuDt4fjJABAIR7jIMLVIPQ1PPhA"
+# Telegram Bot အတွက် Token နှင့် Admin ID များ
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "8633829411:AAEdkGteDuDt4fjJABAIR7jIMLVIPQ1PPhA")
 ADMIN_IDS = [1656832105]
 
-# --- Database Connection ---
-def get_db():
-    conn = psycopg2.connect(DB_URL)
-    conn.autocommit = True
-    return conn
+# မိမိအသုံးပြုမည့် ငွေလွှဲနံပါတ် (ဒီနေရာမှာ ပြင်ပါ)
+KPAY_NUMBER = "09799844344 (Name: YourName)"
 
-# --- Helper: Save User to DB ---
-def get_or_create_fb_user(sender_psid, username="FB_User"):
-    # Facebook ရဲ့ ID (PSID) ကလည်း ဂဏန်းရှည်ကြီးဖြစ်လို့ Telegram ID column ထဲမှာပဲ ထည့်မှတ်လို့ရပါတယ်
-    conn = get_db()
-    c = conn.cursor()
-    c.execute("SELECT unique_id FROM users WHERE telegram_id=%s", (sender_psid,))
-    user = c.fetchone()
-    if not user:
-        unique_id = str(uuid.uuid4())[:8].upper()
-        c.execute("INSERT INTO users (telegram_id, unique_id, is_trial_used, username, referral_reward_claimed, has_rated) VALUES (%s, %s, 0, %s, 0, 0)", 
-                  (sender_psid, unique_id, username))
-    conn.close()
+# ==========================================
+# 🛠️ HELPER FUNCTIONS (အကူအညီပေးသော လုပ်ဆောင်ချက်များ)
+# ==========================================
 
-# --- Helper: Send Message via Facebook Graph API ---
-def send_message(recipient_id, message_text, quick_replies=None):
-    params = {"access_token": FB_PAGE_ACCESS_TOKEN}
-    headers = {"Content-Type": "application/json"}
+def send_to_telegram_admin_photo(fb_sender_id, image_url):
+    """Facebook မှ ပို့သော ပြေစာကို Telegram Admin ထံ ပို့ရန်"""
+    caption_text = f"🚨 Facebook မှ ငွေလွှဲပြေစာ ရောက်လာပါပြီ!\n\nFB User ID: {fb_sender_id}\nကျေးဇူးပြု၍ စစ်ဆေးပေးပါ။"
     
-    data = {
+    # Telegram တွင် ပေါ်မည့် Approve/Reject ခလုတ်များ
+    reply_markup = {
+        "inline_keyboard": [
+            [
+                {"text": "✅ Approve (1 Month)", "callback_data": f"fb_approve_1m_{fb_sender_id}"},
+                {"text": "❌ Reject", "callback_data": f"fb_reject_{fb_sender_id}"}
+            ]
+        ]
+    }
+    
+    for admin_id in ADMIN_IDS:
+        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
+        payload = {
+            "chat_id": admin_id,
+            "photo": image_url,
+            "caption": caption_text,
+            "reply_markup": reply_markup
+        }
+        requests.post(url, json=payload)
+
+def send_fb_message(recipient_id, message_text):
+    """Facebook User ထံ ရိုးရိုး စာသားပို့ရန်"""
+    url = f"https://graph.facebook.com/v18.0/me/messages?access_token={FB_PAGE_ACCESS_TOKEN}"
+    payload = {
         "recipient": {"id": recipient_id},
         "message": {"text": message_text}
     }
-    
-    if quick_replies:
-        data["message"]["quick_replies"] = quick_replies
+    requests.post(url, json=payload)
 
-    response = requests.post("https://graph.facebook.com/v18.0/me/messages", params=params, headers=headers, json=data)
-    return response.json()
+def send_fb_quick_replies(recipient_id, text, quick_replies):
+    """Facebook User ထံ ခလုတ် (Menu) များပါသော စာပို့ရန်"""
+    url = f"https://graph.facebook.com/v18.0/me/messages?access_token={FB_PAGE_ACCESS_TOKEN}"
+    payload = {
+        "recipient": {"id": recipient_id},
+        "message": {
+            "text": text,
+            "quick_replies": quick_replies
+        }
+    }
+    requests.post(url, json=payload)
 
-# --- Helper: Notify Telegram Admins ---
-def notify_admin_on_telegram(text):
-    for admin_id in ADMIN_IDS:
-        url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": admin_id, "text": text, "parse_mode": "Markdown"})
+# ==========================================
+# 🌐 WEBHOOK ROUTES (ချိတ်ဆက်မှု လမ်းကြောင်းများ)
+# ==========================================
 
-# --- Facebook Webhook Verification ---
-@app.route('/webhook', methods=['GET'])
+@app.route("/", methods=["GET"])
+def home():
+    return "Facebook Bot is running perfectly!", 200
+
+@app.route("/webhook", methods=["GET"])
 def verify_webhook():
+    """Facebook မှ Webhook ချိတ်ဆက်မှုကို စစ်ဆေးရန်"""
     mode = request.args.get("hub.mode")
     token = request.args.get("hub.verify_token")
     challenge = request.args.get("hub.challenge")
 
     if mode and token:
         if mode == "subscribe" and token == FB_VERIFY_TOKEN:
-            print("WEBHOOK_VERIFIED")
             return challenge, 200
         else:
             return "Forbidden", 403
-    return "Hello from FB VPN Bot", 200
+    return "OK", 200
 
-# --- Handle Incoming Messenger Messages ---
-@app.route('/webhook', methods=['POST'])
+@app.route("/webhook", methods=["POST"])
 def handle_messages():
-    body = request.json
+    """Facebook မှ ဝင်လာသော စာများကို လက်ခံတုံ့ပြန်ရန်"""
+    data = request.json
+    if data.get("object") == "page":
+        for entry in data.get("entry", []):
+            for messaging_event in entry.get("messaging", []):
+                sender_id = messaging_event["sender"]["id"]
 
-    if body.get("object") == "page":
-        for entry in body.get("entry", []):
-            for webhook_event in entry.get("messaging", []):
-                sender_psid = webhook_event["sender"]["id"]
+                # ၁။ User က Menu ခလုတ်များကို နှိပ်လာလျှင် (Quick Reply Postbacks)
+                if "message" in messaging_event and "quick_reply" in messaging_event["message"]:
+                    payload = messaging_event["message"]["quick_reply"]["payload"]
+                    handle_payload(sender_id, payload)
                 
-                # User အသစ်ဆိုရင် Database ထဲ မှတ်မယ်
-                get_or_create_fb_user(sender_psid)
+                # ၂။ User က ဓာတ်ပုံ (Screenshot) ပို့လာလျှင်
+                elif "message" in messaging_event and "attachments" in messaging_event["message"]:
+                    for attachment in messaging_event["message"]["attachments"]:
+                        if attachment["type"] == "image":
+                            image_url = attachment["payload"]["url"]
+                            # User ကို ပြန်ပြောမယ်
+                            send_fb_message(sender_id, "✅ ပြေစာလက်ခံရရှိပါပြီ။ Admin မှ စစ်ဆေးပေးနေပါသည်။ ခဏစောင့်ပေးပါ ခင်ဗျာ။")
+                            # Telegram Admin ကို လှမ်းပို့မယ်
+                            send_to_telegram_admin_photo(sender_id, image_url)
+                
+                # ၃။ User က ရိုးရိုး စာသား ပို့လာလျှင်
+                elif "message" in messaging_event and "text" in messaging_event["message"]:
+                    text = messaging_event["message"]["text"].strip()
+                    
+                    if text.lower() in ["hi", "hello", "start", "menu"]:
+                        show_main_menu(sender_id)
+                    else:
+                        send_fb_message(sender_id, "ရွေးချယ်ရန် Menu ကို ပြန်ခေါ်လိုပါက 'Menu' ဟု ရိုက်ထည့်ပါ ခင်ဗျာ။")
 
-                if "message" in webhook_event:
-                    handle_postback_or_message(sender_psid, webhook_event["message"])
-                elif "postback" in webhook_event:
-                    # ခလုတ်နှိပ်တဲ့ လုပ်ဆောင်ချက်များ
-                    pass
+    return "EVENT_RECEIVED", 200
 
-        return "EVENT_RECEIVED", 200
-    return "Not Found", 404
+# ==========================================
+# 🤖 BOT LOGIC (Bot ၏ တုံ့ပြန်မှုများ)
+# ==========================================
 
-def handle_postback_or_message(sender_psid, message):
-    text = message.get("text", "").lower()
+def show_main_menu(sender_id):
+    """Main Menu ခလုတ်များ ပြသရန်"""
+    quick_replies = [
+        {"content_type": "text", "title": "🛒 Plan ဝယ်ရန်", "payload": "BUY_PLAN"},
+        {"content_type": "text", "title": "🎁 3GB Free Trial", "payload": "FREE_TRIAL"},
+        {"content_type": "text", "title": "🔍 Plan/Data စစ်ရန်", "payload": "CHECK_DATA"}
+    ]
+    send_fb_quick_replies(sender_id, "HappyHive VPN မှ ကြိုဆိုပါတယ်။ အောက်ပါ Menu များကို ရွေးချယ်နိုင်ပါသည်-", quick_replies)
+
+def handle_payload(sender_id, payload):
+    """User နှိပ်လိုက်သော ခလုတ်ပေါ်မူတည်၍ အလုပ်လုပ်ရန်"""
     
-    # 📸 Screenshot ပို့လာလျှင် (Attachment ပါလျှင်)
-    if "attachments" in message:
-        for attachment in message["attachments"]:
-            if attachment["type"] == "image":
-                img_url = attachment["payload"]["url"]
-                send_message(sender_psid, "✅ ငွေလွှဲပြေစာ လက်ခံရရှိပါပြီ။ Admin မှ စစ်ဆေးပေးနေပါသည်။")
-                # Telegram Admin ဆီကို ပို့ပေးမယ်
-                notify_admin_on_telegram(f"🔔 **FB Messenger မှ ငွေသွင်းမှုအသစ်!**\n\nUser ID: `{sender_psid}`\n\nပြေစာပုံကြည့်ရန်: [Click Here]({img_url})")
-                return
-
-    # Quick Reply (ခလုတ်) ကနေ နှိပ်လိုက်တဲ့ Data ကို ဖမ်းခြင်း
-    payload = None
-    if "quick_reply" in message:
-        payload = message["quick_reply"]["payload"]
-
-    # --- Main Menu ---
-    if text in ["hi", "hello", "start", "menu"] or payload == "BACK_TO_MAIN":
-        welcome_msg = "🌟 Welcome to HappyHive VPN! 🌟\nအောက်ပါ ဝန်ဆောင်မှုများကို ရွေးချယ်နိုင်ပါသည်။ 👇"
+    if payload == "BUY_PLAN":
         quick_replies = [
-            {"content_type": "text", "title": "🎁 Free Trial", "payload": "FREE_TRIAL"},
-            {"content_type": "text", "title": "🛒 Plan ဝယ်ရန်", "payload": "BUY_PLAN"},
-            {"content_type": "text", "title": "👤 Plan/Data စစ်ရန်", "payload": "MY_PLAN"}
+            {"content_type": "text", "title": "1 Month (3000 Ks)", "payload": "PLAN_1M"},
+            {"content_type": "text", "title": "3 Months (8000 Ks)", "payload": "PLAN_3M"}
         ]
-        send_message(sender_psid, welcome_msg, quick_replies)
+        send_fb_quick_replies(sender_id, "🛒 ဝယ်ယူလိုသော Plan ကို ရွေးချယ်ပါ-", quick_replies)
         
-    elif payload == "BUY_PLAN":
-        msg = "🛒 ဝယ်ယူလိုသော Plan ကို ရွေးချယ်ပါ (KPay: 09799844344 သို့ ငွေလွှဲပြီး Screenshot ပို့ပေးပါ)"
-        quick_replies = [
-            {"content_type": "text", "title": "30GB (၂၀၀၀ကျပ်)", "payload": "PLAN_30GB"},
-            {"content_type": "text", "title": "50GB (၃၀၀၀ကျပ်)", "payload": "PLAN_50GB"},
-            {"content_type": "text", "title": "100GB (၄၀၀၀ကျပ်)", "payload": "PLAN_100GB"},
-            {"content_type": "text", "title": "🔙 နောက်သို့", "payload": "BACK_TO_MAIN"}
-        ]
-        send_message(sender_psid, msg, quick_replies)
+    elif payload in ["PLAN_1M", "PLAN_3M"]:
+        plan_name = "1 Month (3000 Ks)" if payload == "PLAN_1M" else "3 Months (8000 Ks)"
+        msg = f"သင်ရွေးချယ်ထားသော Plan: {plan_name}\n\nကျေးဇူးပြု၍ အောက်ပါ KPay/Wave သို့ ငွေလွှဲပြီး Screenshot ပြေစာ ဓာတ်ပုံကို ဤနေရာသို့ ပို့ပေးပါ။\n\n💰 {KPAY_NUMBER}"
+        send_fb_message(sender_id, msg)
         
     elif payload == "FREE_TRIAL":
-        send_message(sender_psid, "⏳ Free Trial Key ထုတ်ပေးနေပါသည်... (မကြာမီ ရရှိပါမည်)")
-        # ဤနေရာတွင် Outline API ကိုခေါ်၍ Key ထုတ်ပေးသည့် Logic ထည့်ရန်
-
-    else:
-        send_message(sender_psid, "ရွေးချယ်ရန် Menu ကို ပြန်ခေါ်လိုပါက 'Menu' ဟု ရိုက်ထည့်ပါ။")
+        # ယာယီစာသား (နောက်ပိုင်း Outline API နဲ့ ချိတ်ရပါမယ်)
+        send_fb_message(sender_id, "🎁 သင်၏ 3GB Free Trial Key ကို ဖန်တီးနေပါသည်။ ခဏစောင့်ပါ...\n(မှတ်ချက်: Server နှင့် ချိတ်ဆက်နေဆဲဖြစ်ပါသည်)")
+        
+    elif payload == "CHECK_DATA":
+        # ယာယီစာသား (နောက်ပိုင်း Database ကနေ သွားစစ်ရပါမယ်)
+        send_fb_message(sender_id, "🔍 သင်၏ လက်ကျန် Data မှာ 3.0 GB ဖြစ်ပါသည်။\n(မှတ်ချက်: စမ်းသပ်မှု အဆင့်သာ ဖြစ်ပါသည်)")
 
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=5000)
