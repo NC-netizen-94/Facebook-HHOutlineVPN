@@ -29,13 +29,27 @@ def get_db():
     conn.autocommit = True
     return conn
 
+# 🌟 FB User ၏ အမည်ရင်းကို ဆွဲယူမည့် Function 🌟
+def get_fb_user_name(psid):
+    url = f"https://graph.facebook.com/{psid}?fields=first_name,last_name&access_token={FB_PAGE_ACCESS_TOKEN}"
+    try:
+        res = requests.get(url).json()
+        if "first_name" in res:
+            return f"{res.get('first_name', '')} {res.get('last_name', '')}".strip()
+    except:
+        pass
+    return "Unknown User"
+
 def send_to_telegram_admin_photo(fb_sender_id, image_url, selected_plan, plan_code):
+    fb_name = get_fb_user_name(fb_sender_id) # နာမည်ဆွဲယူခြင်း
+    
     caption_text = (
         f"🚨 **Facebook မှ ငွေလွှဲပြေစာ ရောက်လာပါပြီ!**\n\n"
-        f"👤 FB User ID: `{fb_sender_id}`\n"
+        f"👤 FB User: **{fb_name}** (`{fb_sender_id}`)\n"
         f"📦 Plan: **{selected_plan}**\n\n"
         f"👇 အောက်ပါ Approve ကိုနှိပ်ပါက FB User ထံသို့ Key အလိုအလျောက် ပေးပို့မည်ဖြစ်ပါသည်။"
     )
+    
     reply_markup = {
         "inline_keyboard": [
             [
@@ -44,6 +58,7 @@ def send_to_telegram_admin_photo(fb_sender_id, image_url, selected_plan, plan_co
             ]
         ]
     }
+    
     for admin_id in ADMIN_IDS:
         url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendPhoto"
         payload = {
@@ -66,7 +81,6 @@ def send_fb_quick_replies(recipient_id, text, quick_replies):
     requests.post(url, json=payload)
 
 def send_fb_local_image(recipient_id, file_path):
-    """Facebook Messenger သို့ Local Image (Screenshot) ပို့ရန်"""
     url = f"https://graph.facebook.com/v18.0/me/messages?access_token={FB_PAGE_ACCESS_TOKEN}"
     if os.path.exists(file_path):
         payload = {
@@ -127,17 +141,18 @@ def handle_free_trial(sender_id):
         
         final_url = f"{new_key.access_url.split('#')[0]}#{urllib.parse.quote(suffix)}"
         
-        # 🌟 Key ကို သီးသန့် ခွဲပို့ခြင်း 🌟
         msg = f"✅ **Free Trial 3GB ရရှိပါပြီ။**\n⏱ **(၅) ရက်တိတိ အသုံးပြုနိုင်ပါသည်။**\n\n👤 **Name:** {suffix}\n\n👇 **အောက်ပါ Key ကို Copy ကူးပြီး Outline VPN တွင် ထည့်သွင်းအသုံးပြုနိုင်ပါပြီ။**"
         send_fb_message(sender_id, msg)
         
         quick_replies = [{"content_type": "text", "title": "🏠 ပင်မ မီနူးသို့", "payload": "MAIN_MENU"}]
         send_fb_quick_replies(sender_id, final_url, quick_replies)
         
+        # 🌟 Admin သို့ အကြောင်းကြားရာတွင် နာမည်ထည့်သွင်းခြင်း
+        fb_name = get_fb_user_name(sender_id)
         for admin in ADMIN_IDS:
             requests.post(
                 f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
-                json={"chat_id": admin, "text": f"🎁 **FB Free Trial Alert**\nFB User ID `{sender_id}` မှ 3GB Free Trial ရယူသွားပါသည်။", "parse_mode": "Markdown"}
+                json={"chat_id": admin, "text": f"🎁 **FB Free Trial Alert**\nFB User: **{fb_name}** (`{sender_id}`) မှ 3GB Free Trial ရယူသွားပါသည်။", "parse_mode": "Markdown"}
             )
             
     except Exception as e:
@@ -184,15 +199,14 @@ def handle_check_data(sender_id):
 
     except Exception as e:
         quick_replies = [{"content_type": "text", "title": "🏠 ပင်မ မီနူးသို့", "payload": "MAIN_MENU"}]
-        send_fb_quick_replies(sender_id, f"❌ Server Error ဖြစ်နေပါသည်။ နောက်မှ ပြန်စမ်းကြည့်ပါ ခင်ဗျာ။", quick_replies)
-
+        send_fb_quick_replies(sender_id, f"❌ Server Error ဖြစ်နေပါသည်။ နောက်မှ ပြန်စမ်းကြည့်ပါ ခင်ဗျာ。", quick_replies)
 
 # ==========================================
 # 🌐 WEBHOOK ROUTES
 # ==========================================
 @app.route("/", methods=["GET"])
 def home():
-    return "Facebook Bot is running perfectly with Check Data & Screenshots!", 200
+    return "Facebook Bot is running perfectly!", 200
 
 @app.route("/setup", methods=["GET"])
 def setup_messenger_profile():
@@ -253,11 +267,15 @@ def handle_messages():
                         send_fb_quick_replies(sender_id, "ရွေးချယ်ရန် Menu ကို ပြန်ခေါ်လိုပါက 'Menu' ဟု ရိုက်ထည့်ပါ ခင်ဗျာ။", quick_replies)
     return "EVENT_RECEIVED", 200
 
+# ==========================================
+# 🤖 BOT PAYLOAD LOGIC
+# ==========================================
 def show_main_menu(sender_id):
     quick_replies = [
         {"content_type": "text", "title": "🛒 Plan ဝယ်ရန်", "payload": "BUY_PLAN"},
         {"content_type": "text", "title": "🎁 3GB Free Trial", "payload": "FREE_TRIAL"},
         {"content_type": "text", "title": "🔍 Plan/Data စစ်ရန်", "payload": "CHECK_DATA"},
+        {"content_type": "text", "title": "👨‍💻 Admin သို့", "payload": "CONTACT_ADMIN"}, # 🌟 အသစ်ထပ်တိုးထားသော Admin သို့ ခလုတ် 🌟
         {"content_type": "text", "title": "❓ အသုံးပြုပုံ", "payload": "HOW_TO_USE"}
     ]
     send_fb_quick_replies(sender_id, "🌟 Welcome to HappyHive VPN! 🌟\n\n👇 အောက်ပါ Menu များမှတဆင့် မိမိအသုံးပြုလိုသော ဝန်ဆောင်မှုကို ရွေးချယ်ပါ ခင်ဗျာ။", quick_replies)
@@ -268,25 +286,26 @@ def handle_payload(sender_id, payload):
         show_main_menu(sender_id)
         
     elif payload == "BUY_PLAN":
+        # 🌟 Plan အမည်များတွင် (၁လ) ထည့်သွင်းထားသည် 🌟
         quick_replies = [
-            {"content_type": "text", "title": "30GB (၂၀၀၀ကျပ်)", "payload": "PLAN_30GB"},
-            {"content_type": "text", "title": "50GB (၃၀၀၀ကျပ်)", "payload": "PLAN_50GB"},
-            {"content_type": "text", "title": "100GB (၄၀၀၀ကျပ်)", "payload": "PLAN_100GB"},
+            {"content_type": "text", "title": "30GB (၁လ) - ၂၀၀၀ကျပ်", "payload": "PLAN_30GB"},
+            {"content_type": "text", "title": "50GB (၁လ) - ၃၀၀၀ကျပ်", "payload": "PLAN_50GB"},
+            {"content_type": "text", "title": "100GB (၁လ) - ၄၀၀၀ကျပ်", "payload": "PLAN_100GB"},
             {"content_type": "text", "title": "🔙 နောက်သို့", "payload": "MAIN_MENU"}
         ]
         send_fb_quick_replies(sender_id, "🛒 ဝယ်ယူလိုသော Plan ကို ရွေးချယ်ပါ-", quick_replies)
         
     elif payload in ["PLAN_30GB", "PLAN_50GB", "PLAN_100GB"]:
         plan_map = {
-            "PLAN_30GB": ("30GB Plan (၂၀၀၀ ကျပ်)", "plan_30gb"),
-            "PLAN_50GB": ("50GB Plan (၃၀၀၀ ကျပ်)", "plan_50gb"),
-            "PLAN_100GB": ("100GB Plan (၄၀၀၀ ကျပ်)", "plan_100gb")
+            "PLAN_30GB": ("30GB (၁လ) - ၂၀၀၀ကျပ်", "plan_30gb"),
+            "PLAN_50GB": ("50GB (၁လ) - ၃၀၀၀ကျပ်", "plan_50gb"),
+            "PLAN_100GB": ("100GB (၁လ) - ၄၀၀၀ကျပ်", "plan_100gb")
         }
         selected_plan, plan_code = plan_map[payload]
         user_plan_selections[sender_id] = {"name": selected_plan, "code": plan_code}
         msg = f"သင်ရွေးချယ်ထားသော Plan: {selected_plan}\n\nကျေးဇူးပြု၍ အောက်ပါ KPay သို့ ငွေလွှဲပြီး Screenshot ပြေစာ ဓာတ်ပုံကို ဤနေရာသို့ ပို့ပေးပါ။\n\n💰 KPay: 09799844344\n👤 Name: Nyein Chan\n📝 Note: shopping ဟုရေးပေးပါ။"
         
-        quick_replies = [{"content_type": "text", "title": "🔙 နောက်သို့", "payload": "BUY_PLAN"}]
+        quick_replies = [{"content_type": "text", "title": "🔙 နောက်သို့", "payload": "BUY_PLAN"}, {"content_type": "text", "title": "🏠 ပင်မ မီနူးသို့", "payload": "MAIN_MENU"}]
         send_fb_quick_replies(sender_id, msg, quick_replies)
         
     elif payload == "FREE_TRIAL":
@@ -294,6 +313,12 @@ def handle_payload(sender_id, payload):
         
     elif payload == "CHECK_DATA":
         handle_check_data(sender_id)
+        
+    # 🌟 Admin သို့ ဆက်သွယ်ရန် လမ်းကြောင်းသစ် 🌟
+    elif payload == "CONTACT_ADMIN":
+        msg = "👨‍💻 Admin နှင့် တိုက်ရိုက်ပြောဆိုရန် အောက်ပါ Telegram လင့်ခ်မှတဆင့် ဆက်သွယ်နိုင်ပါသည်-\n\n👉 https://t.me/HappyHive9496\n\n(သို့မဟုတ်) ဤ Messenger Chat Box တွင်လည်း စာရိုက်၍ မေးမြန်းထားနိုင်ပါသည် ခင်ဗျာ။"
+        quick_replies = [{"content_type": "text", "title": "🏠 ပင်မ မီနူးသို့", "payload": "MAIN_MENU"}]
+        send_fb_quick_replies(sender_id, msg, quick_replies)
         
     elif payload == "HOW_TO_USE":
         quick_replies = [
@@ -303,16 +328,15 @@ def handle_payload(sender_id, payload):
         ]
         send_fb_quick_replies(sender_id, "📱 မိမိအသုံးပြုမည့် ဖုန်းအမျိုးအစားကို ရွေးချယ်ပါ-", quick_replies)
 
-    # 🌟 Mind Map အတိုင်း အသုံးပြုပုံ Flow (App Download -> Screenshot -> Menu) 🌟
     elif payload == "HTU_ANDROID":
         send_fb_message(sender_id, "🤖 **Android ဖုန်းများအတွက် အသုံးပြုပုံ**\n\n📥 Outline App Download ဆွဲရန်:\nhttps://play.google.com/store/apps/details?id=org.outline.android.client&hl=en_SG")
-        send_fb_local_image(sender_id, "android_ss.jpg") # Screenshot ပို့ပေးမည်
+        send_fb_local_image(sender_id, "android_ss.jpg")
         quick_replies = [{"content_type": "text", "title": "🔙 နောက်သို့", "payload": "HOW_TO_USE"}, {"content_type": "text", "title": "🏠 ပင်မ မီနူး", "payload": "MAIN_MENU"}]
         send_fb_quick_replies(sender_id, "Menu သို့ ပြန်သွားရန် အောက်ပါခလုတ်ကို နှိပ်ပါ", quick_replies)
 
     elif payload == "HTU_APPLE":
         send_fb_message(sender_id, "🍎 **Apple (iOS) ဖုန်းများအတွက် အသုံးပြုပုံ**\n\n📥 Outline App Download ဆွဲရန်:\nhttps://apps.apple.com/us/app/outline-app/id1356177741")
-        send_fb_local_image(sender_id, "apple_ss.jpg") # Screenshot ပို့ပေးမည်
+        send_fb_local_image(sender_id, "apple_ss.jpg")
         quick_replies = [{"content_type": "text", "title": "🔙 နောက်သို့", "payload": "HOW_TO_USE"}, {"content_type": "text", "title": "🏠 ပင်မ မီနူး", "payload": "MAIN_MENU"}]
         send_fb_quick_replies(sender_id, "Menu သို့ ပြန်သွားရန် အောက်ပါခလုတ်ကို နှိပ်ပါ", quick_replies)
 
